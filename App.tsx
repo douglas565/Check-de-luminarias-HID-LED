@@ -1,8 +1,8 @@
-import React from 'react';
+import * as React from 'react';
 import { CameraView } from './components/CameraView';
 import { ScanResult } from './components/ScanResult';
 import { analyzeImage } from './services/geminiService';
-import { BatchItem, AnalysisResult } from './types';
+import { BatchItem, AnalysisResult, GroupResult, LuminaireType } from './types';
 import { AlertCircle } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -22,12 +22,34 @@ const App: React.FC = () => {
   };
 
   const handleUpload = async (files: File[]) => {
-    // Create batch items
-    const newItems: BatchItem[] = files.map(file => ({
-      id: Math.random().toString(36).substring(7),
-      file,
-      status: 'pending'
-    }));
+    // Group files by parent folder name
+    const newItems: BatchItem[] = files.map(file => {
+      // webkitRelativePath format: "RootFolder/SubFolderID/Image.jpg"
+      // We want "SubFolderID".
+      const pathParts = file.webkitRelativePath ? file.webkitRelativePath.split('/') : [];
+      
+      let groupId = 'Sem ID';
+      
+      // If we have a structure like Root/ID/Img, take ID (2nd to last)
+      if (pathParts.length >= 2) {
+        groupId = pathParts[pathParts.length - 2];
+      } else {
+         // Fallback for flat file upload
+         groupId = 'Geral';
+      }
+
+      return {
+        id: Math.random().toString(36).substring(7),
+        groupId: groupId,
+        file,
+        status: 'pending'
+      };
+    });
+
+    if (newItems.length === 0) {
+      setError("Nenhuma imagem encontrada nas pastas selecionadas.");
+      return;
+    }
 
     setBatchItems(newItems);
     setView('results');
@@ -77,25 +99,91 @@ const App: React.FC = () => {
     setIsProcessing(false);
   };
 
+  // Logic to aggregate results by Group ID
+  const getAggregatedResults = (): GroupResult[] => {
+    const groups: Record<string, BatchItem[]> = {};
+
+    // Group items
+    batchItems.forEach(item => {
+      if (!groups[item.groupId]) groups[item.groupId] = [];
+      groups[item.groupId].push(item);
+    });
+
+    return Object.keys(groups).map(groupId => {
+      const items = groups[groupId];
+      const totalPhotos = items.length;
+      const processed = items.filter(i => i.status === 'completed' || i.status === 'error');
+      
+      const ledCount = items.filter(i => i.result?.type === LuminaireType.LED).length;
+      const hidCount = items.filter(i => i.result?.type === LuminaireType.HID).length;
+      const unknownCount = items.filter(i => i.result?.type === LuminaireType.UNKNOWN).length;
+
+      // Majority Vote Logic
+      let finalType = LuminaireType.UNKNOWN;
+      if (ledCount > hidCount && ledCount >= unknownCount) {
+        finalType = LuminaireType.LED;
+      } else if (hidCount > ledCount && hidCount >= unknownCount) {
+        finalType = LuminaireType.HID;
+      } else if (ledCount === hidCount && ledCount > 0) {
+        finalType = LuminaireType.UNKNOWN; // Tie or ambiguous
+      }
+
+      // Calculate Average Confidence of the WINNING type
+      const relevantItems = items.filter(i => i.result?.type === finalType);
+      const avgConfidence = relevantItems.length > 0
+        ? relevantItems.reduce((acc, curr) => acc + (curr.result?.confidence || 0), 0) / relevantItems.length
+        : 0;
+
+      // Determine Group Status
+      let status: any = 'pending';
+      if (processed.length === totalPhotos) status = 'completed';
+      else if (processed.length > 0) status = 'processing';
+
+      return {
+        groupId,
+        totalPhotos,
+        processedPhotos: processed.length,
+        ledCount,
+        hidCount,
+        unknownCount,
+        finalType,
+        avgConfidence,
+        status,
+        items
+      };
+    });
+  };
+
   const handleExportCSV = () => {
-    if (batchItems.length === 0) return;
+    const groups = getAggregatedResults();
+    if (groups.length === 0) return;
 
     // Excel BOM to force UTF-8 (fixes accents)
     const BOM = "\uFEFF"; 
     
-    const headers = ["Nome do Arquivo", "Classificação", "Confiança (%)", "Status", "Explicação"];
-    const rows = batchItems.map(item => {
-        const typeName = item.result?.type === 'HID' ? 'CONVENCIONAL' : (item.result?.type || 'N/A');
-        const confidence = item.result ? Math.round(item.result.confidence * 100) : 0;
-        // Escape quotes in explanation
-        const explanation = item.result?.explanation.replace(/"/g, '""') || item.error || '';
+    // Header for Group Export
+    const headers = [
+      "ID Luminária (Pasta)", 
+      "Classificação Final", 
+      "Precisão Média (%)", 
+      "Qtd Fotos LED", 
+      "Qtd Fotos HID", 
+      "Qtd Fotos Incertas",
+      "Total Fotos"
+    ];
+
+    const rows = groups.map(g => {
+        const typeName = g.finalType === 'HID' ? 'CONVENCIONAL' : g.finalType;
+        const confidence = Math.round(g.avgConfidence * 100);
         
         return [
-          `"${item.file.name}"`,
+          `"${g.groupId}"`,
           `"${typeName}"`,
           `${confidence}`,
-          `"${item.status}"`,
-          `"${explanation}"`
+          `${g.ledCount}`,
+          `${g.hidCount}`,
+          `${g.unknownCount}`,
+          `${g.totalPhotos}`
         ].join(",");
     });
 
@@ -105,7 +193,7 @@ const App: React.FC = () => {
     
     const link = document.createElement("a");
     link.setAttribute("href", url);
-    link.setAttribute("download", `LumiCheck_Relatorio_${new Date().toISOString().slice(0,10)}.csv`);
+    link.setAttribute("download", `LumiCheck_Consolidado_${new Date().toISOString().slice(0,10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -138,6 +226,7 @@ const App: React.FC = () => {
         {view === 'results' && (
           <ScanResult 
             items={batchItems} 
+            groups={getAggregatedResults()}
             onExport={handleExportCSV} 
             onReset={handleReset}
             isProcessing={isProcessing}
