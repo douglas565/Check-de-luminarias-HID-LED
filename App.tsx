@@ -1,9 +1,9 @@
-import * as React from 'react';
+import React from 'react';
 import { CameraView } from './components/CameraView';
 import { ScanResult } from './components/ScanResult';
 import { analyzeImage } from './services/geminiService';
 import { BatchItem, AnalysisResult, GroupResult, LuminaireType } from './types';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, WifiOff } from 'lucide-react';
 
 const App: React.FC = () => {
   const [view, setView] = React.useState<'upload' | 'results'>('upload');
@@ -63,7 +63,7 @@ const App: React.FC = () => {
     // Create a copy to work with for updates
     const currentQueue = [...items];
 
-    // Process one by one to avoid hitting API rate limits
+    // No API rate limit needed for offline logic, but we keep a small delay to not freeze UI
     for (let i = 0; i < currentQueue.length; i++) {
       const item = currentQueue[i];
       
@@ -92,8 +92,8 @@ const App: React.FC = () => {
         ));
       }
 
-      // Small delay to be nice to the API
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Small UI breathing room
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
     setIsProcessing(false);
@@ -210,9 +210,9 @@ const App: React.FC = () => {
       {/* Header - Compact */}
       <header className="h-12 bg-slate-950 flex items-center justify-center border-b border-slate-800 z-20 shrink-0">
         <div className="flex items-center gap-2">
-           <div className="w-2.5 h-2.5 rounded-full bg-gradient-to-r from-cyan-400 to-blue-600 animate-pulse"></div>
-           <h1 className="text-base font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-blue-400">
-             LumiCheck <span className="text-slate-500 font-normal">| Batch AI</span>
+           <div className="w-2.5 h-2.5 rounded-full bg-gradient-to-r from-emerald-400 to-cyan-600 animate-pulse"></div>
+           <h1 className="text-base font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-emerald-400 to-cyan-400">
+             LumiCheck <span className="text-slate-500 font-normal">| Offline Engine</span>
            </h1>
         </div>
       </header>

@@ -1,4 +1,4 @@
-import * as React from 'react';
+import React from 'react';
 import { Upload, Image as ImageIcon, FileUp, FolderUp, FolderSearch } from 'lucide-react';
 
 interface CameraViewProps {

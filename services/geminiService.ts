@@ -1,117 +1,157 @@
-import { GoogleGenAI, Type } from "@google/genai";
 import { AnalysisResult, LuminaireType } from "../types";
 
-// Helper to convert base64 to standard format if needed, though GenAI handles raw base64 often.
-// We assume the input is a full data URL (data:image/jpeg;base64,...) but handle raw base64 too.
+// Declaration for Tesseract since we loaded it via CDN script tag
+declare const Tesseract: any;
+
 const cleanBase64 = (dataUrl: string) => {
   const parts = dataUrl.split(',');
   return parts.length > 1 ? parts[1] : dataUrl;
 };
 
+// Helper to load image for canvas processing
+const loadImage = (src: string): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "Anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+};
+
 export const analyzeImage = async (base64Image: string): Promise<Omit<AnalysisResult, 'id' | 'timestamp' | 'fileName'>> => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error("Chave da API não encontrada. Configure a variável de ambiente API_KEY.");
-  }
-
-  const ai = new GoogleGenAI({ apiKey });
-
-  // Define the schema for structured output
-  const schema = {
-    type: Type.OBJECT,
-    properties: {
-      classification: {
-        type: Type.STRING,
-        enum: ["LED", "HID", "UNKNOWN"],
-        description: "Classify the luminaire as LED or HID (High Intensity Discharge). If unclear, use UNKNOWN."
-      },
-      confidence: {
-        type: Type.NUMBER,
-        description: "Confidence score between 0 and 1."
-      },
-      explanation: {
-        type: Type.STRING,
-        description: "A brief explanation in Portuguese explaining why this classification was made, focusing purely on visual characteristics (bulb vs diodes, color, housing shape)."
-      },
-      visualCues: {
-        type: Type.ARRAY,
-        items: { type: Type.STRING },
-        description: "List of visual features observed (e.g., 'múltiplos diodos', 'luz alaranjada', 'dissipador de calor'). In Portuguese."
-      }
-    },
-    required: ["classification", "confidence", "explanation", "visualCues"],
-    propertyOrdering: ["classification", "confidence", "explanation", "visualCues"]
-  };
-
-  const prompt = `
-    Atue como um especialista em inventário de iluminação pública (IP).
-    Sua ÚNICA missão é classificar a tecnologia da fonte luminosa na imagem.
-    
-    CLASSIFICAÇÃO BINÁRIA (LED vs HID):
-    1. LED: Tecnologia moderna.
-    2. HID (Convencional): Inclui Vapor de Sódio (HPS), Vapor Metálico (HPI/MH), Mercúrio (HPL/HQL).
-
-    REGRAS RÍGIDAS:
-    - NÃO tente ler etiquetas de potência (Watts). Ignore números escritos na carcaça.
-    - NÃO tente estimar luminosidade ou eficiência.
-    - Foque puramente na aparência do EMISSOR DE LUZ e do CORPO da luminária.
-
-    CRITÉRIOS VISUAIS PARA LED:
-    - Pontos de luz múltiplos (chips/diodos amarelos ou brancos).
-    - Lentes individuais sobre cada ponto de LED (matriz).
-    - Corpo da luminária geralmente fino (slim), plano ou com aletas de dissipação visíveis em cima.
-    - Luz branca, fria e direcional (se estiver acesa).
-    - Ausência de vidro côncavo profundo.
-
-    CRITÉRIOS VISUAIS PARA HID (CONVENCIONAL):
-    - Presença de um bulbo/lâmpada de vidro grande (formato oval, tubular ou elíptico) dentro da luminária.
-    - Grande refletor espelhado curvo atrás da lâmpada.
-    - Luz amarela/alaranjada (Sódio) ou branca brilhante difusa (Metálico).
-    - Corpo da luminária geralmente profundo, bojo grande, formato "cabeça de cobra" ou ovalado.
-    - Difusor prismático antigo (acrílico/vidro raiado).
-
-    Se não for possível ver a fonte de luz ou a luminária, classifique como UNKNOWN.
-  `;
-
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: 'image/jpeg',
-              data: cleanBase64(base64Image)
-            }
-          },
-          { text: prompt }
-        ]
-      },
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: schema,
-        temperature: 0.1 // Very low temperature for consistent classification
+    const imageSrc = base64Image.startsWith('data:') ? base64Image : `data:image/jpeg;base64,${base64Image}`;
+    const img = await loadImage(imageSrc);
+
+    // 1. Setup Canvas for Analysis
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error("Canvas context falhou");
+    
+    // Resize for performance optimization (OCR works faster on smaller imgs, but needs quality)
+    const maxWidth = 800;
+    const scale = Math.min(1, maxWidth / img.width);
+    canvas.width = img.width * scale;
+    canvas.height = img.height * scale;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    // --- FASE 1: OCR (Reconhecimento de Texto) ---
+    // Usamos Tesseract para ler etiquetas na luminária
+    let ocrText = "";
+    let ocrSignal = 0; // -1 (HID) a 1 (LED)
+    const visualCues: string[] = [];
+
+    try {
+      const { data: { text } } = await Tesseract.recognize(canvas, 'eng', {
+        logger: () => {} // Silence logs
+      });
+      ocrText = text.toUpperCase();
+      
+      if (ocrText.includes("LED")) {
+        ocrSignal += 5; 
+        visualCues.push("Texto 'LED' detectado na carcaça");
       }
-    });
+      if (ocrText.includes("SODIUM") || ocrText.includes("SON") || ocrText.includes("HPS")) {
+        ocrSignal -= 5;
+        visualCues.push("Texto 'SODIUM/HPS' detectado");
+      }
+      if (ocrText.includes("MERCURY") || ocrText.includes("VAPOR")) {
+        ocrSignal -= 5;
+        visualCues.push("Texto 'VAPOR/MERCURY' detectado");
+      }
+    } catch (e) {
+      console.warn("OCR falhou ou nada detectado, seguindo para análise visual.");
+    }
 
-    const jsonText = response.text;
-    if (!jsonText) throw new Error("No data returned from AI");
+    // --- FASE 2: Análise Colorimétrica (Pixel Data) ---
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    
+    let rTotal = 0, gTotal = 0, bTotal = 0;
+    let brightnessTotal = 0;
+    let pixelCount = 0;
 
-    const data = JSON.parse(jsonText);
+    // Amostrar a cada 10 pixels para performance
+    for (let i = 0; i < data.length; i += 40) {
+      const r = data[i];
+      const g = data[i + 1];
+      const b = data[i + 2];
+      
+      // Ignorar pixels muito escuros (fundo) ou muito claros (estouro) para a média de cor
+      const brightness = (r + g + b) / 3;
+      if (brightness > 40 && brightness < 250) {
+        rTotal += r;
+        gTotal += g;
+        bTotal += b;
+        pixelCount++;
+      }
+      brightnessTotal += brightness;
+    }
 
+    const avgR = rTotal / pixelCount;
+    const avgG = gTotal / pixelCount;
+    const avgB = bTotal / pixelCount;
+
+    let colorSignal = 0; // -1 (HID) a 1 (LED)
+
+    // Lógica de Cor:
+    // Vapor de Sódio (HID): Muito Vermelho e Verde (Amarelo/Laranja), Pouco Azul.
+    // LED: Geralmente tem mais Azul proporcionalmente ou espectro balanceado (Branco).
+    
+    // Razão Vermelho/Azul
+    const rbRatio = avgR / (avgB + 1); // +1 evita divisão por zero
+
+    if (avgR > avgB * 1.5 && avgG > avgB) {
+      // Tom Quente/Alaranjado -> Típico Sódio
+      colorSignal -= 2; 
+      visualCues.push(`Espectro Quente (R:${Math.round(avgR)} G:${Math.round(avgG)} B:${Math.round(avgB)}) indica Vapor de Sódio`);
+    } else if (avgB > avgR * 0.8) {
+      // Tom Frio/Branco -> Típico LED ou Metal Metálico (mas vamos pesar para LED pois é o moderno)
+      colorSignal += 1.5;
+      visualCues.push(`Espectro Frio/Branco indica provável LED`);
+    } else {
+      visualCues.push("Espectro de cor neutro/inconclusivo");
+    }
+
+    // --- DECISÃO FINAL ---
+    // Somamos os sinais. OCR tem peso infinito (se leu LED, é LED).
+    // Se não leu nada, a cor decide.
+    
+    let totalScore = colorSignal + ocrSignal;
     let type = LuminaireType.UNKNOWN;
-    if (data.classification === 'LED') type = LuminaireType.LED;
-    if (data.classification === 'HID') type = LuminaireType.HID;
+    let confidence = 0.5;
+    let explanation = "";
+
+    if (totalScore > 0.5) {
+      type = LuminaireType.LED;
+      confidence = Math.min(0.6 + (Math.abs(totalScore) * 0.1), 0.99);
+      explanation = "Identificado como LED baseado em análise espectral de luz fria e/ou leitura de caracteres OCR.";
+    } else if (totalScore < -0.5) {
+      type = LuminaireType.HID;
+      confidence = Math.min(0.6 + (Math.abs(totalScore) * 0.1), 0.99);
+      explanation = "Identificado como CONVENCIONAL (HID) baseado no espectro de cor amarelado (Sódio) ou etiquetas detectadas.";
+    } else {
+      // Inconclusivo
+      type = LuminaireType.UNKNOWN;
+      confidence = 0.4;
+      explanation = "Análise inconclusiva. A imagem pode estar escura demais ou sem características visuais ou textuais claras.";
+    }
 
     return {
       type,
-      confidence: data.confidence,
-      explanation: data.explanation,
-      visualCues: data.visualCues || []
+      confidence,
+      explanation,
+      visualCues
     };
 
-  } catch (error) {
-    console.error("Gemini Analysis Error:", error);
-    throw new Error("Falha ao analisar a imagem. Tente novamente.");
+  } catch (error: any) {
+    console.error("Local Analysis Error:", error);
+    return {
+      type: LuminaireType.UNKNOWN,
+      confidence: 0,
+      explanation: "Erro no processamento local da imagem: " + error.message,
+      visualCues: []
+    };
   }
 };

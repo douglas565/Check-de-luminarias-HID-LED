@@ -1,4 +1,4 @@
-import * as React from 'react';
+import React from 'react';
 import { BatchItem, GroupResult, LuminaireType } from '../types';
 import { Download, CheckCircle2, Loader2, XCircle, FileSpreadsheet, ArrowLeft, ChevronDown, ChevronRight, Image as ImageIcon } from 'lucide-react';
 
