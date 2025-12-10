@@ -1,6 +1,6 @@
-import React from 'react';
+import * as React from 'react';
 import { BatchItem, GroupResult, LuminaireType } from '../types';
-import { Download, CheckCircle2, Loader2, XCircle, FileSpreadsheet, ArrowLeft, ChevronDown, ChevronRight, Image as ImageIcon } from 'lucide-react';
+import { Download, CheckCircle2, Loader2, XCircle, FileSpreadsheet, ArrowLeft, ChevronDown, ChevronRight, Image as ImageIcon, Sun } from 'lucide-react';
 
 interface ScanResultProps {
   items: BatchItem[];
@@ -33,13 +33,19 @@ export const ScanResult: React.FC<ScanResultProps> = ({ items, groups, onExport,
           <div>
             <h2 className="text-2xl font-bold text-white flex items-center gap-2">
               <FileSpreadsheet className="text-green-500" />
-              Relatório Consolidado
+              Relatório Diurno (Hardware)
             </h2>
-            <p className="text-slate-400 text-sm mt-1">
-              {isProcessing 
-                ? `Processando imagem ${completedCount} de ${items.length}...` 
-                : 'Análise concluída.'}
-            </p>
+            <div className="flex items-center gap-2 mt-1">
+               <Sun className="w-4 h-4 text-yellow-500" />
+               <p className="text-slate-400 text-sm">
+                Modo Offline Ativo: Detectando componentes visuais (Chips vs Bulbos)
+               </p>
+            </div>
+            {isProcessing && (
+                 <p className="text-slate-500 text-xs mt-2">
+                   Processando imagem {completedCount} de {items.length}...
+                 </p>
+            )}
           </div>
           
           <div className="flex gap-3 w-full md:w-auto">
@@ -170,6 +176,11 @@ export const ScanResult: React.FC<ScanResultProps> = ({ items, groups, onExport,
                                   </span>
                                   <span className="text-xs text-slate-600 truncate flex-1">
                                      {item.result?.explanation}
+                                     {item.result?.visualCues && item.result.visualCues.length > 0 && (
+                                       <span className="block text-xs text-slate-500 mt-1 italic">
+                                         Detecção: {item.result.visualCues.join(', ')}
+                                       </span>
+                                     )}
                                   </span>
                                </div>
                              ))}

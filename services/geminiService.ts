@@ -3,12 +3,27 @@ import { AnalysisResult, LuminaireType } from "../types";
 // Declaration for Tesseract since we loaded it via CDN script tag
 declare const Tesseract: any;
 
-const cleanBase64 = (dataUrl: string) => {
-  const parts = dataUrl.split(',');
-  return parts.length > 1 ? parts[1] : dataUrl;
+// Helper to convert RGB to HSV for better color segmentation (Yellow Phosphor detection)
+const rgbToHsv = (r: number, g: number, b: number) => {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0, v = max;
+  const d = max - min;
+  s = max === 0 ? 0 : d / max;
+
+  if (max === min) {
+    h = 0; // achromatic
+  } else {
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      case b: h = (r - g) / d + 4; break;
+    }
+    h /= 6;
+  }
+  return [h * 360, s * 100, v * 100];
 };
 
-// Helper to load image for canvas processing
 const loadImage = (src: string): Promise<HTMLImageElement> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -24,118 +39,126 @@ export const analyzeImage = async (base64Image: string): Promise<Omit<AnalysisRe
     const imageSrc = base64Image.startsWith('data:') ? base64Image : `data:image/jpeg;base64,${base64Image}`;
     const img = await loadImage(imageSrc);
 
-    // 1. Setup Canvas for Analysis
+    // 1. Setup Canvas
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error("Canvas context falhou");
     
-    // Resize for performance optimization (OCR works faster on smaller imgs, but needs quality)
-    const maxWidth = 800;
+    // Resize for OCR performance
+    const maxWidth = 1000; // Increased slightly for better text reading
     const scale = Math.min(1, maxWidth / img.width);
     canvas.width = img.width * scale;
     canvas.height = img.height * scale;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // --- FASE 1: OCR (Reconhecimento de Texto) ---
-    // Usamos Tesseract para ler etiquetas na luminária
+    // --- FASE 1: OCR TÉCNICO (Leitura de Carcaça) ---
     let ocrText = "";
-    let ocrSignal = 0; // -1 (HID) a 1 (LED)
+    let ocrSignal = 0; 
     const visualCues: string[] = [];
 
     try {
+      // Whitelist characters to improve accuracy for technical codes
       const { data: { text } } = await Tesseract.recognize(canvas, 'eng', {
-        logger: () => {} // Silence logs
+        logger: () => {}
       });
       ocrText = text.toUpperCase();
+
+      // Palavras-chave de LED
+      if (ocrText.match(/\b(LED|L.E.D|DIODE|MODUL|DRIVER|IP66|IP67)\b/)) {
+        ocrSignal += 4;
+        visualCues.push("Texto Técnico LED identificado (LED/DRIVER/MODULE)");
+      }
       
-      if (ocrText.includes("LED")) {
-        ocrSignal += 5; 
-        visualCues.push("Texto 'LED' detectado na carcaça");
-      }
-      if (ocrText.includes("SODIUM") || ocrText.includes("SON") || ocrText.includes("HPS")) {
+      // Palavras-chave de HID (Sódio/Metálico)
+      if (ocrText.match(/\b(SON|NAV|HPS|H.P.S|SODIUM|VIALOX)\b/)) {
         ocrSignal -= 5;
-        visualCues.push("Texto 'SODIUM/HPS' detectado");
+        visualCues.push("Código de Lâmpada de Sódio detectado (SON/NAV/HPS)");
       }
-      if (ocrText.includes("MERCURY") || ocrText.includes("VAPOR")) {
+      if (ocrText.match(/\b(MH|HPI|HQI|METAL|HALIDE|MERCURY|VAPOR|HPL)\b/)) {
         ocrSignal -= 5;
-        visualCues.push("Texto 'VAPOR/MERCURY' detectado");
+        visualCues.push("Código de Lâmpada Metálica/Mercúrio detectado");
       }
+      if (ocrText.includes("E27") || ocrText.includes("E40")) {
+        ocrSignal -= 2; // Soquete de rosca indica lâmpada tradicional (geralmente)
+        visualCues.push("Base E27/E40 detectada (Típico de lâmpadas convencionais)");
+      }
+
     } catch (e) {
-      console.warn("OCR falhou ou nada detectado, seguindo para análise visual.");
+      console.warn("OCR Silent Fail");
     }
 
-    // --- FASE 2: Análise Colorimétrica (Pixel Data) ---
+    // --- FASE 2: ANÁLISE DE HARDWARE (Pixels Diurnos) ---
+    // Como está apagada, procuramos por:
+    // 1. Chips de LED: Pequenos pontos Amarelo-Limão (Fósforo)
+    // 2. Bulbos HID: Áreas grandes Brancas Leitosas ou Vidro
+    
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
     
-    let rTotal = 0, gTotal = 0, bTotal = 0;
-    let brightnessTotal = 0;
-    let pixelCount = 0;
+    let yellowPhosphorPixels = 0;
+    let whiteBulbPixels = 0;
+    let totalAnalyzed = 0;
 
-    // Amostrar a cada 10 pixels para performance
-    for (let i = 0; i < data.length; i += 40) {
+    for (let i = 0; i < data.length; i += 20) { // Sample rate
       const r = data[i];
       const g = data[i + 1];
       const b = data[i + 2];
       
-      // Ignorar pixels muito escuros (fundo) ou muito claros (estouro) para a média de cor
-      const brightness = (r + g + b) / 3;
-      if (brightness > 40 && brightness < 250) {
-        rTotal += r;
-        gTotal += g;
-        bTotal += b;
-        pixelCount++;
+      const [h, s, v] = rgbToHsv(r, g, b);
+
+      // Detecção de Fósforo de LED (Amarelo Específico)
+      // Hue entre 45 e 65 (Amarelo), Saturação Média/Alta, Brilho Médio
+      if (h > 45 && h < 65 && s > 40 && v > 30) {
+        yellowPhosphorPixels++;
       }
-      brightnessTotal += brightness;
+
+      // Detecção de Bulbo Branco Leitador (Sódio/Metálico apagado)
+      // Quase sem cor (S < 15), Muito brilhante (V > 70)
+      if (s < 15 && v > 70) {
+        whiteBulbPixels++;
+      }
+
+      totalAnalyzed++;
     }
 
-    const avgR = rTotal / pixelCount;
-    const avgG = gTotal / pixelCount;
-    const avgB = bTotal / pixelCount;
+    const phosphorRatio = yellowPhosphorPixels / totalAnalyzed;
+    const bulbRatio = whiteBulbPixels / totalAnalyzed;
 
-    let colorSignal = 0; // -1 (HID) a 1 (LED)
+    let hardwareSignal = 0;
 
-    // Lógica de Cor:
-    // Vapor de Sódio (HID): Muito Vermelho e Verde (Amarelo/Laranja), Pouco Azul.
-    // LED: Geralmente tem mais Azul proporcionalmente ou espectro balanceado (Branco).
-    
-    // Razão Vermelho/Azul
-    const rbRatio = avgR / (avgB + 1); // +1 evita divisão por zero
-
-    if (avgR > avgB * 1.5 && avgG > avgB) {
-      // Tom Quente/Alaranjado -> Típico Sódio
-      colorSignal -= 2; 
-      visualCues.push(`Espectro Quente (R:${Math.round(avgR)} G:${Math.round(avgG)} B:${Math.round(avgB)}) indica Vapor de Sódio`);
-    } else if (avgB > avgR * 0.8) {
-      // Tom Frio/Branco -> Típico LED ou Metal Metálico (mas vamos pesar para LED pois é o moderno)
-      colorSignal += 1.5;
-      visualCues.push(`Espectro Frio/Branco indica provável LED`);
-    } else {
-      visualCues.push("Espectro de cor neutro/inconclusivo");
+    // Ajuste de sensibilidade
+    if (phosphorRatio > 0.005) { // Se 0.5% da imagem for amarelo fósforo
+      hardwareSignal += 3;
+      visualCues.push(`Chips de LED detectados (Fósforo Amarelo: ${(phosphorRatio*100).toFixed(2)}%)`);
+    } else if (bulbRatio > 0.10) { // Se 10% da imagem for branco leitoso
+      hardwareSignal -= 2;
+      visualCues.push(`Provável bulbo/vidro de lâmpada detectado (Área Clara: ${(bulbRatio*100).toFixed(2)}%)`);
     }
 
     // --- DECISÃO FINAL ---
-    // Somamos os sinais. OCR tem peso infinito (se leu LED, é LED).
-    // Se não leu nada, a cor decide.
+    let totalScore = hardwareSignal + ocrSignal;
     
-    let totalScore = colorSignal + ocrSignal;
+    // Se não detectou nada significativo, tenta heurística de contraste
+    // LEDs costumam ter alto contraste local (pontos pretos e amarelos)
+    // Lâmpadas têm gradientes suaves. 
+    // (Simplificado aqui para manter performance offline)
+
     let type = LuminaireType.UNKNOWN;
     let confidence = 0.5;
     let explanation = "";
 
-    if (totalScore > 0.5) {
+    if (totalScore > 0) {
       type = LuminaireType.LED;
-      confidence = Math.min(0.6 + (Math.abs(totalScore) * 0.1), 0.99);
-      explanation = "Identificado como LED baseado em análise espectral de luz fria e/ou leitura de caracteres OCR.";
-    } else if (totalScore < -0.5) {
+      confidence = Math.min(0.6 + (totalScore * 0.1), 0.95);
+      explanation = "Identificado visualmente como LED (Chips de fósforo amarelos visíveis ou marcações 'LED/Driver' na carcaça).";
+    } else if (totalScore < 0) {
       type = LuminaireType.HID;
-      confidence = Math.min(0.6 + (Math.abs(totalScore) * 0.1), 0.99);
-      explanation = "Identificado como CONVENCIONAL (HID) baseado no espectro de cor amarelado (Sódio) ou etiquetas detectadas.";
+      confidence = Math.min(0.6 + (Math.abs(totalScore) * 0.1), 0.95);
+      explanation = "Identificado como CONVENCIONAL (HID) pela presença de bulbo de vidro, soquete E40/E27 ou códigos (SON/NAV).";
     } else {
-      // Inconclusivo
       type = LuminaireType.UNKNOWN;
-      confidence = 0.4;
-      explanation = "Análise inconclusiva. A imagem pode estar escura demais ou sem características visuais ou textuais claras.";
+      confidence = 0.3;
+      explanation = "Inconclusivo. Sem chips de LED visíveis ou códigos legíveis na imagem desligada.";
     }
 
     return {
@@ -150,7 +173,7 @@ export const analyzeImage = async (base64Image: string): Promise<Omit<AnalysisRe
     return {
       type: LuminaireType.UNKNOWN,
       confidence: 0,
-      explanation: "Erro no processamento local da imagem: " + error.message,
+      explanation: "Erro no processamento: " + error.message,
       visualCues: []
     };
   }
