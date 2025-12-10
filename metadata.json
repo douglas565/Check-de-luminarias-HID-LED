@@ -1,0 +1,5 @@
+{
+  "name": "LumiCheck - Identificador de Luminárias",
+  "description": "Identifique instantaneamente se uma luminária é LED ou HID (Vapor de Sódio/Mercúrio) usando inteligência artificial.",
+  "requestFramePermissions": []
+}
